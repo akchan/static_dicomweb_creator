@@ -6,6 +6,8 @@
 
 A Python library and CLI tool for generating static DICOMweb endpoints from DICOM files. Create self-contained, deployable medical imaging web applications without requiring a PACS server or database.
 
+This project was inspired by the [RadicalImaging/Static-DICOMWeb](https://github.com/RadicalImaging/static-dicomweb) (javascript, node.js).
+
 ## ✨ Features
 
 - 🚀 **Zero Server Requirements**: Generate static files that can be served from any web server or CDN
