@@ -12,7 +12,7 @@ A Python library and CLI tool for generating static DICOMweb endpoints from DICO
 - 🔒 **Self-Contained**: All DICOM metadata and images converted to web-friendly formats
 - 📊 **DICOMweb Compatible**: Generates standard DICOMweb API endpoints (WADO-RS)
 - 🌐 **OHIF Viewer Ready**: Works out-of-the-box with OHIF Viewer for viewing medical images
-- 📦 **Easy Deployment**: Included docker templates
+- 📦 **Easy Deployment**: Includes docker templates
 
 ## 📋 Requirements
 
