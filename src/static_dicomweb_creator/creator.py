@@ -394,6 +394,8 @@ class StaticDICOMWebCreatorForOHIFViewer(StaticDICOMWebCreator):
                  write_bulkdata_pixeldata=False,
                  included_fields_for_study: Sequence[str | int] = [],
                  included_fields_for_series: Sequence[str | int] = [],
+                 write_json_fmt=True,
+                 write_gzip_fmt=True,
                  patient_study_dirname="patients",
                  verbose=False
                  ):
@@ -407,9 +409,6 @@ class StaticDICOMWebCreatorForOHIFViewer(StaticDICOMWebCreator):
             "0008103E",  # Series Description
         ]
         self.patient_study_dirname = str(patient_study_dirname)
-
-        write_json_fmt = False
-        write_gzip_fmt = True
 
         super().__init__(output_path,
                          root_uri,
