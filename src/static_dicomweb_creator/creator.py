@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # coding: UTF-8
 
-from itertools import groupby
 import os
 from pathlib import Path
 import re
@@ -20,10 +19,11 @@ class StaticDICOMWebCreator:
                  bulkdata_dirname="bulkdata",
                  bulkdata_threshold=1024 * 50,  # 50KB
                  write_bulkdata_pixeldata=False,
-                 included_fields_for_study: Sequence[str | int] = [],
-                 included_fields_for_series: Sequence[str | int] = [],
+                 included_fields_for_study: Sequence[str] = [],
+                 included_fields_for_series: Sequence[str] = [],
                  write_json_fmt=True,
                  write_gzip_fmt=False,
+                 write_sorted_json_keys=True,
                  verbose=False
                  ):
         self.output_path = Path(output_path)
@@ -33,25 +33,47 @@ class StaticDICOMWebCreator:
         self.write_bulkdata_pixeldata = write_bulkdata_pixeldata
         self.write_json_fmt = write_json_fmt
         self.write_gzip_fmt = write_gzip_fmt
+        self.write_sorted_json_keys = write_sorted_json_keys
         self.verbose = verbose
 
-        self.included_fields_for_study = self.validate_included_fields(included_fields_for_study)
-        self.included_fields_for_series = self.validate_included_fields(included_fields_for_series)
+        self.included_fields_for_study = list(included_fields_for_study)
+        self.included_fields_for_series = list(included_fields_for_series)
 
-    def validate_included_fields(self, fields: Sequence[str | int]) -> list[str]:
-        validated_fields = []
-        for field in fields:
-            if isinstance(field, int):
-                field_str = f"{field:08X}"
-            else:
-                field_str = str(field).upper()
+        self.tags_study_level_mandatory = [
+            "StudyDate",
+            "StudyTime",
+            "AccessionNumber",
+            "InstanceAvailability",
+            # "ModalitiesInStudy",
+            "ReferringPhysicianName",
+            "PatientName",
+            "PatientID",
+            "PatientBirthDate",
+            "PatientSex",
+            "StudyInstanceUID",
+            "StudyID",
+            # "NumberOfStudyRelatedSeries",
+            # "NumberOfStudyRelatedInstances",
+        ]
+        self.tags_study_level_optional = [
+            "SpecificCharacterSet",
+            "TimezoneOffsetFromUTC",
+        ]
 
-            assert len(field_str) == 8, f"Field string must be 8 characters: {field_str}"
-            assert field_str == f"{int(field_str, 16):08X}", f"Field string must be hexadecimal: {field_str}"
-
-            validated_fields.append(field_str)
-
-        return validated_fields
+        self.tags_series_level_mandatory = [
+            "Modality",
+            "SeriesInstanceUID",
+            "SeriesNumber",
+            "NumberOfSeriesRelatedInstances",
+        ]
+        self.tags_series_level_optional = [
+            "SpecificCharacterSet",
+            "TimezoneOffsetFromUTC",
+            "SeriesDescription",
+            "PerformedProcedureStepStartDate",
+            "PerformedProcedureStepStartTime",
+            "RequestAttributeSequence",
+        ]
 
     def add_dcm_instance(self, dcm: pydicom.Dataset):
         assert isinstance(dcm, pydicom.Dataset), f"Expected pydicom.Dataset, got {type(dcm)}"
@@ -103,10 +125,12 @@ class StaticDICOMWebCreator:
 
     def create_json(self):
         for study_dir_path in self.list_study_dirs():
-            print(study_dir_path)
+            if self.verbose:
+                print("Study:", study_dir_path)
 
             for series_dir_path in self.list_series_dirs(study_dir_path):
-                print(" ", series_dir_path)
+                if self.verbose:
+                    print("  Series:", series_dir_path)
 
                 self.create_series_json(series_dir_path)
                 self.create_series_metadata_json(series_dir_path)
@@ -139,122 +163,123 @@ class StaticDICOMWebCreator:
         '''
         series_dir_path = Path(series_dir_path)
 
+        # List instance metadata dirs
         instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
 
+        # If no instance metadata, return
         if len(instance_metadata_dir_path_list) == 0:
             return
 
+        # Read first instance metadata
         json_dict = self.read_json(instance_metadata_dir_path_list[0] / "index.json")
         json_dict = cast(dict, json_dict)
         dcm_instance = pydicom.Dataset.from_json(json_dict)
 
+        # Set values for dicomweb standard tags
         dcm = pydicom.Dataset()
-        dcm.Modality = dcm_instance.get("Modality", "")  # (0008,0056) Modality
-        dcm.SeriesDescription = dcm_instance.get("SeriesDescription", "")  # (0008,103E) Series Description
-        dcm.SeriesInstanceUID = dcm_instance.SeriesInstanceUID  # (0020,000E) Series Instance UID
-        dcm.SeriesNumber = dcm_instance.get("SeriesNumber", "")  # (0020,0011) Series Number
-        dcm.NumberOfSeriesRelatedInstances = len(instance_metadata_dir_path_list)  # (0020,1209) Number of Series Related Instances
+        for tag_keyword in self.tags_series_level_mandatory:
+            setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
 
+        tags_optional = self.tags_series_level_optional + self.included_fields_for_series
+        for tag_keyword in tags_optional:
+            if hasattr(dcm_instance, tag_keyword):
+                setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
+
+        dcm.NumberOfSeriesRelatedInstances = len(instance_metadata_dir_path_list)
+
+        # Write series JSON
         series_json_path = series_dir_path / "index.json"
         self.write_json(series_json_path, dcm.to_json_dict())
 
     def create_all_series_json(self, study_dir_path: str | Path):
+        '''
+        Gather series-level metadata for all series in the study.
+        '''
         study_dir_path = Path(study_dir_path)
 
         all_series_json_dict_list = []
-        modalities = set()
-        num_series = 0
-        num_instances = 0
-        series_dir_path_list = self.list_series_dirs(study_dir_path)
 
-        # Get study-level metadata from the first instance metadata
-        study_json_dict = {}
-        for series_dir_path in series_dir_path_list:
-            instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
-            if len(instance_metadata_dir_path_list) > 0:
-                first_instance_metadata_path = instance_metadata_dir_path_list[0] / "index.json"
-                instance_json_dict = self.read_json(first_instance_metadata_path)
-                instance_json_dict = cast(dict, instance_json_dict)
-                study_json_dict = self.filter_json_dict_for_study(instance_json_dict)
-                break
-
-        assert len(study_json_dict.keys()) > 0, f"No instance metadata found in study {study_dir_path}"
-
-        # Read series metadata
-        for series_dir_path in series_dir_path_list:
+        for series_dir_path in self.list_series_dirs(study_dir_path):
             series_json_path = series_dir_path / "index.json"
 
             if not series_json_path.is_file() and not series_json_path.with_suffix(".gz").is_file():
-                self.create_series_json(series_dir_path)
+                continue
 
             series_json_dict = self.read_json(series_json_path)
             series_json_dict = cast(dict, series_json_dict)
-            series_json_dict.update(study_json_dict)  # Add study-level metadata
             all_series_json_dict_list.append(series_json_dict)
-            num_series += 1
-            num_instances += series_json_dict.get("00201209", {}).get("Value", 0)
 
-            modality = series_json_dict.get("00080060", {}).get("Value", [""])[0]
-            if modality != "":
-                modalities.add(modality)
-
-        # Set values for dicomweb standard tags
-        for json_dict in all_series_json_dict_list:
-            json_dict["00080061"]["Value"] = list(modalities)
-            json_dict["00201206"]["Value"] = num_series  # Number of Study Related Series
-            json_dict["00201208"]["Value"] = num_instances  # Number of Study Related Instances
+        if len(all_series_json_dict_list) == 0:
+            return
 
         dcm = pydicom.Dataset()
         dcm.StudyInstanceUID = study_dir_path.name
         all_series_json_path = self.build_path_all_series_json(dcm)
         self.write_json(all_series_json_path, all_series_json_dict_list)
 
+    def create_study_json(self, study_dir_path: str | Path):
+        '''
+        Create study-level metadata JSON for a single study.
+        '''
+        study_dir_path = Path(study_dir_path)
+
+        # Take one instance for making template
+        dcm_template = self.take_an_instance_from_study(study_dir_path)
+        if dcm_template is None:
+            return
+
+        dcm = pydicom.Dataset()
+
+        # Set values for dicomweb standard tags
+        for tag_keyword in self.tags_study_level_mandatory:
+            setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
+
+        for tag_keyword in self.tags_study_level_optional:
+            if hasattr(dcm_template, tag_keyword):
+                setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
+
+        # Set some complicated values
+        modalities_in_study = set()
+        number_of_study_related_series = 0
+        number_of_study_related_instances = 0
+
+        dcm_tmp = pydicom.Dataset()
+        dcm_tmp.StudyInstanceUID = study_dir_path.name
+        all_series_json_path = self.build_path_all_series_json(dcm_tmp)
+        all_series_json = self.read_json(all_series_json_path)
+
+        if all_series_json is None:
+            return
+
+        for series_json_dict in cast(list, all_series_json):
+            dcm_se = pydicom.Dataset.from_json(series_json_dict)
+            modalities_in_study.add(dcm_se.Modality)
+            number_of_study_related_series += 1
+            number_of_study_related_instances += dcm_se.get("NumberOfSeriesRelatedInstances", 0)
+
+        dcm.ModalitiesInStudy = list(modalities_in_study)
+        dcm.NumberOfStudyRelatedSeries = number_of_study_related_series
+        dcm.NumberOfStudyRelatedInstances = number_of_study_related_instances
+
+        # Write study JSON
+        study_json_path = study_dir_path / "index.json"
+        self.write_json(study_json_path, dcm.to_json_dict())
+
     def create_all_studies_json(self):
+        '''Gather study-level metadata for all studies.'''
         all_studies_json_dict_list = []
-        study_dir_path_list = self.list_study_dirs()
 
-        for study_dir_path in study_dir_path_list:
-            dcm = pydicom.Dataset()
-            dcm.StudyInstanceUID = study_dir_path.name
-            all_series_json_path = self.build_path_all_series_json(dcm)
+        for study_dir_path in self.list_study_dirs():
+            study_json_path = study_dir_path / "index.json"
+            study_json = self.read_json(study_json_path)
 
-            if not all_series_json_path.is_file() and not all_series_json_path.with_suffix(".gz").is_file():
-                self.create_all_series_json(study_dir_path)
+            if study_json is None:
+                continue
 
-            all_series_json_dict_list = self.read_json(all_series_json_path)
-            series_json_dict = self.filter_json_dict_for_study(all_series_json_dict_list[0])
-            all_studies_json_dict_list.append(series_json_dict)
+            all_studies_json_dict_list.append(study_json)
 
-        all_studies_json_path = self.output_path / "studies" / "index.json"
+        all_studies_json_path = self.build_path_all_studies_json()
         self.write_json(all_studies_json_path, all_studies_json_dict_list)
-
-    def filter_json_dict_for_study(self, json_dict: dict) -> dict:
-        json_dict_filtered = {
-            # Tags defined in DICOMweb standard
-            "00080020": json_dict.get("00080020", ""),  # Study Date
-            "00080030": json_dict.get("00080030", ""),  # Study Time
-            "00080050": json_dict.get("00080050", ""),  # Accession Number
-            "00080061": {"Value": [], "vr": "CS"},  # Modalities in Study
-            "00080090": json_dict.get("00080090", ""),  # Referring Physician's Name
-            "00100010": json_dict.get("00100010", ""),  # Patient's Name
-            "00100020": json_dict.get("00100020", ""),  # Patient ID
-            "00100030": json_dict.get("00100030", ""),  # Patient's Birth Date
-            "00100040": json_dict.get("00100040", ""),  # Patient's Sex
-            "0020000D": json_dict.get("0020000D", ""),  # Study Instance UID
-            "00200010": json_dict.get("00200010", ""),  # Study ID
-            "00201206": json_dict.get("00201206", {"Value": 0, "vr": "IS"}),  # Number of Study Related Series
-            "00201208": json_dict.get("00201208", {"Value": 0, "vr": "IS"}),  # Number of Study Related Instances
-        }
-
-        for field in self.included_fields_for_study:
-            if isinstance(field, int):
-                field = f"{field:08X}"
-            field = str(field)
-
-            if field not in json_dict_filtered:
-                json_dict_filtered[field] = json_dict.get(field, "")
-
-        return json_dict_filtered
 
     def dcm_to_json_dict(self, dcm: pydicom.Dataset) -> tuple[dict, list[pydicom.DataElement]]:
         bulkdata_list: list[pydicom.DataElement] = []
@@ -268,19 +293,25 @@ class StaticDICOMWebCreator:
 
         return json_dict, bulkdata_list
 
-    def read_json(self, path: Path) -> list[dict] | dict:
-        path_gz = Path(str(path) + ".gz")
+    def read_json(self, filepath: Path) -> list[dict] | dict | None:
+        filepath_gz = Path(str(filepath) + ".gz")
 
-        if path.is_file() and path.stat().st_size > 0:
-            ret = read_json(path)
-        elif path_gz.is_file():
-            ret = read_json(path, is_gzip=True)
+        if filepath.is_file() and filepath.stat().st_size > 0:
+            ret = read_json(filepath)
+        elif filepath_gz.is_file():
+            ret = read_json(filepath, is_gzip=True)
         else:
-            raise FileNotFoundError(f"JSON file not found: {path} or {path_gz}")
+            ret = None
 
         return ret
 
     def write_json(self, path: Path, json_dict: list[dict] | dict):
+        if self.write_sorted_json_keys:
+            if isinstance(json_dict, dict):
+                json_dict = dict(sorted(json_dict.items()))
+            else:
+                json_dict = [dict(sorted(item.items())) for item in json_dict]
+
         if self.write_json_fmt:
             write_json(path, json_dict, write_json_fmt=True, write_gzip_fmt=False)
         else:
@@ -329,6 +360,18 @@ class StaticDICOMWebCreator:
                 instance_metadata_dir_path_list.append(dir_path)
 
         return instance_metadata_dir_path_list
+
+    def take_an_instance_from_study(self, study_dir_path: str | Path) -> pydicom.Dataset | None:
+        study_dir_path = Path(study_dir_path)
+
+        for series_dir_path in self.list_series_dirs(study_dir_path):
+            for instance_metadata_dir_path in self.list_instance_metadata_dirs(series_dir_path):
+                json_dict = self.read_json(instance_metadata_dir_path / "index.json")
+                json_dict = cast(dict, json_dict)
+                dcm = pydicom.Dataset.from_json(json_dict)
+                return dcm
+
+        return None
 
     def build_path_study(self, dcm: pydicom.Dataset) -> Path:
         return self.output_path / "studies" / dcm.StudyInstanceUID
@@ -380,19 +423,21 @@ class StaticDICOMWebCreatorForOHIFViewer(StaticDICOMWebCreator):
                  bulkdata_dirname="bulkdata",
                  bulkdata_threshold=1024 * 50,  # 50KB
                  write_bulkdata_pixeldata=False,
-                 included_fields_for_study: Sequence[str | int] = [],
-                 included_fields_for_series: Sequence[str | int] = [],
+                 included_fields_for_study: Sequence[str] = [],
+                 included_fields_for_series: Sequence[str] = [],
                  write_json_fmt=True,
                  write_gzip_fmt=True,
-                 patient_study_dirname="patients",
+                 write_sorted_json_keys=True,
                  verbose=False
                  ):
         included_fields_for_series = [
-            "00080021",  # Series Date
-            "00080031",  # Series Time
-            "0008103E",  # Series Description
+            "SeriesDate",  # 0x00080021
+            "SeriesTime",  # 0x00080031
+            "SeriesDescription",  # 0x0008103E
         ]
-        self.patient_study_dirname = str(patient_study_dirname)
+        included_fields_for_study = [
+            "StudyDescription",  # 0x00081030
+        ]
 
         super().__init__(output_path,
                          root_uri,
@@ -403,25 +448,5 @@ class StaticDICOMWebCreatorForOHIFViewer(StaticDICOMWebCreator):
                          included_fields_for_series,
                          write_json_fmt,
                          write_gzip_fmt,
+                         write_sorted_json_keys,
                          verbose)
-
-    def create_json(self):
-        super().create_json()
-        self.create_patient_study_json()
-
-    def create_patient_study_json(self):
-        all_studies_json_dict: list[dict] = self.read_json(self.build_path_all_studies_json())  # type: ignore
-
-        # (0010, 0020) Patient ID
-        def get_patient_id(json_dict: dict) -> str:
-            return json_dict.get("00100020", {}).get("Value", [""])[0]
-
-        all_studies_json_dict = sorted(all_studies_json_dict, key=get_patient_id)
-        for patient_id, patient_json_dict_list in groupby(all_studies_json_dict, key=get_patient_id):
-            studies_json_dict_list = list(patient_json_dict_list)
-
-            patient_study_json_path = self.build_path_patient_study_json(patient_id)
-            self.write_json(patient_study_json_path, studies_json_dict_list)
-
-    def build_path_patient_study_json(self, patient_id: str) -> Path:
-        return self.output_path / self.patient_study_dirname / patient_id / "index.json"
