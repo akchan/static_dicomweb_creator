@@ -399,10 +399,6 @@ class StaticDICOMWebCreatorForOHIFViewer(StaticDICOMWebCreator):
                  patient_study_dirname="patients",
                  verbose=False
                  ):
-        # Set default included fields for OHIF viewer
-        included_fields_for_study = [
-            "00080060",  # Modality
-        ]
         included_fields_for_series = [
             "00080021",  # Series Date
             "00080031",  # Series Time
