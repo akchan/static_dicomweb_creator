@@ -135,20 +135,16 @@ class StaticDICOMWebCreator:
     def create_series_metadata_json(self, series_dir_path: str | Path):
         series_dir_path = Path(series_dir_path)
 
-        series_metadata_list = []
-        instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
-
-        assert len(instance_metadata_dir_path_list) > 0, f"No instance metadata found in series {series_dir_path}"
-        json_dict = {}
-
-        for instance_metadata_dir_path in instance_metadata_dir_path_list:
+        series_metadata_list: list[dict] = []
+        for instance_metadata_dir_path in self.list_instance_metadata_dirs(series_dir_path):
             json_dict = self.read_json(instance_metadata_dir_path / "index.json")
             json_dict = cast(dict, json_dict)
             series_metadata_list.append(json_dict)
 
-        dcm = pydicom.Dataset.from_json(json_dict)
-        series_metadata_path = self.build_path_series_metadata_json(dcm)
-        self.write_json(series_metadata_path, series_metadata_list)
+        if len(series_metadata_list) > 0:
+            dcm = pydicom.Dataset.from_json(series_metadata_list[0])
+            series_metadata_path = self.build_path_series_metadata_json(dcm)
+            self.write_json(series_metadata_path, series_metadata_list)
 
     def create_all_series_json(self, study_dir_path: str | Path):
         study_dir_path = Path(study_dir_path)
