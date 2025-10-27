@@ -115,24 +115,9 @@ class StaticDICOMWebCreator:
 
         self.create_all_studies_json()
 
-    def create_series_json(self, series_dir_path: str | Path):
-        series_dir_path = Path(series_dir_path)
-        json_dict = {}
-        instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
-        for instance_metadata_dir_path in instance_metadata_dir_path_list:
-            json_dict = self.read_json(instance_metadata_dir_path / "index.json")
-            json_dict = cast(dict, json_dict)
-            break
-
-        series_dict = self.filter_json_dict_for_series(json_dict)
-        series_dict["00201209"] = {
-            "Value": len(instance_metadata_dir_path_list),
-            "vr": "IS"}  # Number of Series Related Instances
-
-        series_json_path = series_dir_path / "index.json"
-        self.write_json(series_json_path, series_dict)
-
     def create_series_metadata_json(self, series_dir_path: str | Path):
+        """Includes metadata of all instances
+        """
         series_dir_path = Path(series_dir_path)
 
         series_metadata_list: list[dict] = []
@@ -145,6 +130,33 @@ class StaticDICOMWebCreator:
             dcm = pydicom.Dataset.from_json(series_metadata_list[0])
             series_metadata_path = self.build_path_series_metadata_json(dcm)
             self.write_json(series_metadata_path, series_metadata_list)
+
+    def create_series_json(self, series_dir_path: str | Path):
+        '''
+        # References
+
+        - https://dicom.nema.org/dicom/2013/output/chtml/part18/sect_6.7.html#sect_6.7.1.2.2.2
+        '''
+        series_dir_path = Path(series_dir_path)
+
+        instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
+
+        if len(instance_metadata_dir_path_list) == 0:
+            return
+
+        json_dict = self.read_json(instance_metadata_dir_path_list[0] / "index.json")
+        json_dict = cast(dict, json_dict)
+        dcm_instance = pydicom.Dataset.from_json(json_dict)
+
+        dcm = pydicom.Dataset()
+        dcm.Modality = dcm_instance.get("Modality", "")  # (0008,0056) Modality
+        dcm.SeriesDescription = dcm_instance.get("SeriesDescription", "")  # (0008,103E) Series Description
+        dcm.SeriesInstanceUID = dcm_instance.SeriesInstanceUID  # (0020,000E) Series Instance UID
+        dcm.SeriesNumber = dcm_instance.get("SeriesNumber", "")  # (0020,0011) Series Number
+        dcm.NumberOfSeriesRelatedInstances = len(instance_metadata_dir_path_list)  # (0020,1209) Number of Series Related Instances
+
+        series_json_path = series_dir_path / "index.json"
+        self.write_json(series_json_path, dcm.to_json_dict())
 
     def create_all_series_json(self, study_dir_path: str | Path):
         study_dir_path = Path(study_dir_path)
@@ -235,26 +247,6 @@ class StaticDICOMWebCreator:
         }
 
         for field in self.included_fields_for_study:
-            if isinstance(field, int):
-                field = f"{field:08X}"
-            field = str(field)
-
-            if field not in json_dict_filtered:
-                json_dict_filtered[field] = json_dict.get(field, "")
-
-        return json_dict_filtered
-
-    def filter_json_dict_for_series(self, json_dict: dict) -> dict:
-        json_dict_filtered = {
-            # Tags defined in DICOMweb standard
-            "00080060": json_dict.get("00080060", ""),  # Modality
-            "00081190": json_dict.get("00081190", {"Value": [], "vr": "UR"}),  # Retrieve URL
-            "0020000E": json_dict.get("0020000E", ""),  # Series Instance UID
-            "00200011": json_dict.get("00200011", ""),  # Series Number
-            "00201209": json_dict.get("00201209", {"Value": 0, "vr": "IS"}),  # Number of Series Related Instances
-        }
-
-        for field in self.included_fields_for_series:
             if isinstance(field, int):
                 field = f"{field:08X}"
             field = str(field)
