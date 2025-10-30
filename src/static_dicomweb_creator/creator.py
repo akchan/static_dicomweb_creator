@@ -136,6 +136,7 @@ class StaticDICOMWebCreator:
                 self.create_series_metadata_json(series_dir_path)
 
             self.create_all_series_json(study_dir_path)
+            self.create_study_json(study_dir_path)
 
         self.create_all_studies_json()
 
