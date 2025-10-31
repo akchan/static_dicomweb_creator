@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Union, TypeAlias
 
 import pydicom
+from pydicom.dataset import Dataset
+
+
+def is_dicomdir(dcm: Dataset) -> bool:
+    return getattr(dcm, "file_meta", False) and\
+        (getattr(dcm.file_meta, "MediaStorageSOPClassUID", False) == pydicom.uid.MediaStorageDirectoryStorage)
 
 
 def list_dicom_files(dir_path: str | Path) -> list[Path]:
