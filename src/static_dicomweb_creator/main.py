@@ -5,7 +5,7 @@ import sys
 
 import pydicom
 
-from .utils import list_dicom_files
+from .utils import list_dicom_files, is_dicomdir
 from .creator import StaticDICOMWebCreator, StaticDICOMWebCreatorForOHIFViewer
 
 
@@ -30,6 +30,8 @@ def main() -> int:
 
     for dcm_path in list_dicom_files(args.dicomdir):
         dcm = pydicom.dcmread(dcm_path)
+        if is_dicomdir(dcm):
+            continue
         creator.add_dcm_instance(dcm)
     creator.create_json()
 
