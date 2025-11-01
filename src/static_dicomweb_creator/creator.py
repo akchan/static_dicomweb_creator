@@ -77,51 +77,51 @@ class StaticDICOMWebCreator:
 
     def add_dcm_instance(self, dcm: pydicom.Dataset):
         assert isinstance(dcm, pydicom.Dataset), f"Expected pydicom.Dataset, got {type(dcm)}"
+        # Process pixel data frames
+        if 'PixelData' in dcm:
+            self.write_pixel_frames(dcm)
 
+        # Process the header and bulkdata elements
         json_dict, bulkdata_elem_list = self.dcm_to_json_dict(dcm)
 
         # Write bulk data
         for elem in bulkdata_elem_list:
             # In case of pixel data
-            if elem.tag == 0x7FE00010:
-                number_of_frames = dcm.get('NumberOfFrames', 1)
-                transfer_syntax_uid = str(dcm.file_meta.TransferSyntaxUID)
-
-                for i, frame in enumerate(generate_frames(dcm.PixelData)):
-                    frame_path = self.build_path_instance_frame(dcm, i + 1)
-                    self.write_binary(frame_path, frame, transfer_syntax_uid)
-
-                    if self.verbose:
-                        print(f"Writing frame {i + 1}/{number_of_frames} to {frame_path}")
-
-                if self.write_bulkdata_pixeldata:
-                    bulkdata_path = self.build_path_instance_bulk(dcm, elem)
-                    self.write_binary(bulkdata_path, elem.value)
-
-                    bulkdata_uri = self.build_uri_instance_bulk(dcm, elem)
-                    json_dict["7FE00010"] = {
-                        "vr": "OB",
-                        "BulkDataURI": bulkdata_uri
-                    }
-
-                    if self.verbose:
-                        print(f"Writing bulk pixel data to {bulkdata_path}")
-                else:
-                    del json_dict["7FE00010"]
+            if elem.tag == 0x7FE00010 and not self.write_bulkdata_pixeldata:
+                del json_dict["7FE00010"]
             else:
-                bulkdata_path = self.build_path_instance_bulk(dcm, elem)
-                bulk_data = elem.value
-                self.write_binary(bulkdata_path, bulk_data)
-
-                bulkdata_uri = self.build_uri_instance_bulk(dcm, elem)
-                json_dict[f"{elem.tag:08X}"] = {
-                    "vr": "OB",
-                    "BulkDataURI": bulkdata_uri
-                }
+                self.write_bulkdata_element(dcm, elem)
 
         # Write metadata
         instance_metadata_path = self.build_path_instance_metadata(dcm)
         self.write_json(instance_metadata_path, json_dict)
+
+    def write_pixel_frames(self, dcm: pydicom.Dataset):
+        number_of_frames = dcm.get('NumberOfFrames', 1)
+        transfer_syntax_uid = str(dcm.file_meta.TransferSyntaxUID)
+
+        for i, frame in enumerate(generate_frames(dcm.PixelData)):
+            frame_path = self.build_path_instance_frame(dcm, i + 1)
+
+            if self.verbose:
+                print(f"Writing frame {i + 1}/{number_of_frames} to {frame_path}")
+
+            self.write_binary(frame_path, frame, transfer_syntax_uid)
+
+    def write_bulkdata_element(self, dcm: pydicom.Dataset, elem: pydicom.DataElement):
+        bulkdata_path = self.build_path_instance_bulk(dcm, elem)
+        bulk_data = elem.value
+
+        if self.verbose:
+            print(f"Writing bulk data for element {elem.tag} to {bulkdata_path}")
+
+        self.write_binary(bulkdata_path, bulk_data)
+
+        bulkdata_uri = self.build_uri_instance_bulk(dcm, elem)
+        return {
+            "vr": "OB",
+            "BulkDataURI": bulkdata_uri
+        }
 
     def create_json(self):
         for study_dir_path in self.list_study_dirs():
