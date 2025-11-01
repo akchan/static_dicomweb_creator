@@ -26,6 +26,7 @@ classifiers = [
 ]
 dependencies = [
     "pydicom>=2.0.0",
+    "pylibjpeg>=2.0.1",
     "pylibjpeg-libjpeg",
     "pylibjpeg-openjpeg",
     "pylibjpeg-rle",
