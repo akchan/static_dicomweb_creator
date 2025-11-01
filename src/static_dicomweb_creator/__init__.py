@@ -3,7 +3,7 @@
 A tool for creating static DICOM web applications.
 """
 
-__version__ = "0.2.6"
+__version__ = "0.2.7"
 
 from .main import main
 
