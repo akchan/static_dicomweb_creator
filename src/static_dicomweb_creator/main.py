@@ -31,6 +31,8 @@ def main() -> int:
     processed = 0
     excluded = 0
 
+    print(f"Processed: {processed}, Excluded : {excluded}    ", end="\r")
+
     for dcm_path in list_dicom_files(args.dicomdir):
         dcm = pydicom.dcmread(dcm_path)
         if is_dicomdir(dcm):
