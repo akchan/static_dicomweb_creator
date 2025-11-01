@@ -35,13 +35,21 @@ def main() -> int:
 
     for dcm_path in list_dicom_files(args.dicomdir):
         dcm = pydicom.dcmread(dcm_path)
+
         if is_dicomdir(dcm):
             excluded += 1
             continue
-        creator.add_dcm_instance(dcm)
+
+        try:
+            creator.add_dcm_instance(dcm)
+        except Exception as e:
+            print("Error processing file:", dcm_path)
+            raise e
+
         processed += 1
 
         print(f"Processed: {processed}, Excluded : {excluded}    ", end="\r")
+
     creator.create_json()
 
     return 0
