@@ -123,7 +123,8 @@ class StaticDICOMWebCreator:
             "BulkDataURI": bulkdata_uri
         }
 
-    def create_json(self):
+    def create_json(self, create_studies_json_for_study_iter: bool = False,
+                    create_studies_json_for_series_iter: bool = False):
         for study_dir_path in self.list_study_dirs():
             if self.verbose:
                 print("Study:", study_dir_path)
@@ -135,8 +136,16 @@ class StaticDICOMWebCreator:
                 self.create_series_json(series_dir_path)
                 self.create_series_metadata_json(series_dir_path)
 
+                if create_studies_json_for_series_iter:
+                    self.create_all_series_json(study_dir_path)
+                    self.create_study_json(study_dir_path)
+                    self.create_all_studies_json()
+
             self.create_all_series_json(study_dir_path)
             self.create_study_json(study_dir_path)
+
+            if create_studies_json_for_study_iter:
+                self.create_all_studies_json()
 
         self.create_all_studies_json()
 
