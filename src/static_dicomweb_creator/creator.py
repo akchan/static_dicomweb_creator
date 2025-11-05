@@ -90,7 +90,7 @@ class StaticDICOMWebCreator:
             if elem.tag == 0x7FE00010 and not self.write_bulkdata_pixeldata:
                 del json_dict["7FE00010"]
             else:
-                self.write_bulkdata_element(dcm, elem)
+                json_dict[f"{elem.tag:08X}"] = self.write_bulkdata_element(dcm, elem)
 
         # Write metadata
         instance_metadata_path = self.build_path_instance_metadata(dcm)
