@@ -424,6 +424,7 @@ class StaticDICOMWebCreator:
     def build_uri_instance_bulk(self, dcm: pydicom.Dataset, elem: pydicom.DataElement) -> str:
         filepath = self.build_path_instance_bulk(dcm, elem)
         uri = os.path.join(self.root_uri, filepath.relative_to(self.output_path))
+        uri = os.path.dirname(uri)  # Return directory URI
         return uri
 
 
