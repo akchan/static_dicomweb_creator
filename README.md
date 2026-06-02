@@ -1,4 +1,4 @@
-# Static DICOMweb Creator
+# [Static DICOMweb Creator](https://github.com/akchan/static_dicomweb_creator)
 
 [![PyPI version](https://badge.fury.io/py/static-dicomweb-creator.svg)](https://badge.fury.io/py/static-dicomweb-creator)
 [![Python Support](https://img.shields.io/pypi/pyversions/static-dicomweb-creator.svg)](https://pypi.org/project/static-dicomweb-creator/)
