@@ -125,29 +125,142 @@ class StaticDICOMWebCreator:
 
     def create_json(self, create_studies_json_for_study_iter: bool = False,
                     create_studies_json_for_series_iter: bool = False):
+        '''
+        Single bottom-up pass: every instance metadata ``index.json`` is read
+        exactly once, and the series-/study-/all-level aggregates are built up
+        in memory instead of being re-read from disk. This avoids the duplicate
+        globs/reads and the O(N^2) aggregate regeneration that occurs when the
+        per-iteration flags are enabled.
+        '''
+        all_studies_json_dicts: list[dict] = []
+
         for study_dir_path in self.list_study_dirs():
             if self.verbose:
                 print("Study:", study_dir_path)
+
+            all_series_json_dicts: list[dict] = []
+            study_template: Optional[pydicom.Dataset] = None
 
             for series_dir_path in self.list_series_dirs(study_dir_path):
                 if self.verbose:
                     print("  Series:", series_dir_path)
 
-                self.create_series_json(series_dir_path)
-                self.create_series_metadata_json(series_dir_path)
+                instance_metadata_dir_path_list = self.list_instance_metadata_dirs(series_dir_path)
+                if len(instance_metadata_dir_path_list) == 0:
+                    continue
+
+                # Read every instance metadata exactly once
+                instance_json_dicts: list[dict] = []
+                for instance_metadata_dir_path in instance_metadata_dir_path_list:
+                    json_dict = self.read_json(instance_metadata_dir_path / "index.json")
+                    instance_json_dicts.append(cast(dict, json_dict))
+
+                first_dcm = pydicom.Dataset.from_json(instance_json_dicts[0])
+
+                # Series metadata JSON: metadata of all instances
+                series_metadata_path = self.build_path_series_metadata_json(first_dcm)
+                self.write_json(series_metadata_path, instance_json_dicts)
+
+                # Series JSON: derived from the first instance + instance count
+                series_json_dict = self._build_series_json_dict(first_dcm, len(instance_json_dicts))
+                self.write_json(series_dir_path / "index.json", series_json_dict)
+                all_series_json_dicts.append(series_json_dict)
+
+                if study_template is None:
+                    study_template = first_dcm
 
                 if create_studies_json_for_series_iter:
-                    self.create_all_series_json(study_dir_path)
-                    self.create_study_json(study_dir_path)
-                    self.create_all_studies_json()
+                    self._write_all_series_json(study_dir_path, all_series_json_dicts)
+                    study_json_dict = self._build_study_json_dict(study_template, all_series_json_dicts)
+                    self.write_json(study_dir_path / "index.json", study_json_dict)
+                    # Mirror the on-disk behaviour: previously-finalised studies
+                    # plus the just-written study for the current one.
+                    self._write_all_studies_json(all_studies_json_dicts + [study_json_dict])
 
-            self.create_all_series_json(study_dir_path)
-            self.create_study_json(study_dir_path)
+            if len(all_series_json_dicts) == 0:
+                continue
+
+            assert study_template is not None
+
+            self._write_all_series_json(study_dir_path, all_series_json_dicts)
+            study_json_dict = self._build_study_json_dict(study_template, all_series_json_dicts)
+            self.write_json(study_dir_path / "index.json", study_json_dict)
+            all_studies_json_dicts.append(study_json_dict)
 
             if create_studies_json_for_study_iter:
-                self.create_all_studies_json()
+                self._write_all_studies_json(all_studies_json_dicts)
 
-        self.create_all_studies_json()
+        self._write_all_studies_json(all_studies_json_dicts)
+
+    def _build_series_json_dict(self, dcm_instance: pydicom.Dataset, instance_count: int) -> dict:
+        '''
+        Build the series-level DICOMweb JSON dict from a representative instance.
+
+        # References
+
+        - https://dicom.nema.org/dicom/2013/output/chtml/part18/sect_6.7.html#sect_6.7.1.2.2.2
+        '''
+        dcm = pydicom.Dataset()
+
+        # Set values for dicomweb standard tags
+        for tag_keyword in self.tags_series_level_mandatory:
+            setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
+
+        tags_optional = self.tags_series_level_optional + self.included_fields_for_series
+        for tag_keyword in tags_optional:
+            if hasattr(dcm_instance, tag_keyword):
+                setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
+
+        dcm.NumberOfSeriesRelatedInstances = instance_count
+
+        return dcm.to_json_dict()
+
+    def _build_study_json_dict(self, dcm_template: pydicom.Dataset,
+                               series_json_dicts: list[dict]) -> dict:
+        '''
+        Build the study-level DICOMweb JSON dict from a representative instance
+        and the in-memory series-level JSON dicts.
+        '''
+        dcm = pydicom.Dataset()
+
+        # Set values for dicomweb standard tags
+        for tag_keyword in self.tags_study_level_mandatory:
+            setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
+
+        for tag_keyword in self.tags_study_level_optional:
+            if hasattr(dcm_template, tag_keyword):
+                setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
+
+        # Set some complicated values
+        modalities_in_study = set()
+        number_of_study_related_series = 0
+        number_of_study_related_instances = 0
+
+        for series_json_dict in series_json_dicts:
+            dcm_se = pydicom.Dataset.from_json(series_json_dict)
+            modalities_in_study.add(dcm_se.Modality)
+            number_of_study_related_series += 1
+            number_of_study_related_instances += dcm_se.get("NumberOfSeriesRelatedInstances", 0)
+
+        dcm.ModalitiesInStudy = list(modalities_in_study)
+        dcm.NumberOfStudyRelatedSeries = number_of_study_related_series
+        dcm.NumberOfStudyRelatedInstances = number_of_study_related_instances
+
+        return dcm.to_json_dict()
+
+    def _write_all_series_json(self, study_dir_path: str | Path,
+                               all_series_json_dicts: list[dict]):
+        if len(all_series_json_dicts) == 0:
+            return
+
+        dcm = pydicom.Dataset()
+        dcm.StudyInstanceUID = Path(study_dir_path).name
+        all_series_json_path = self.build_path_all_series_json(dcm)
+        self.write_json(all_series_json_path, all_series_json_dicts)
+
+    def _write_all_studies_json(self, all_studies_json_dicts: list[dict]):
+        all_studies_json_path = self.build_path_all_studies_json()
+        self.write_json(all_studies_json_path, all_studies_json_dicts)
 
     def create_series_metadata_json(self, series_dir_path: str | Path):
         """Includes metadata of all instances
@@ -185,21 +298,11 @@ class StaticDICOMWebCreator:
         json_dict = cast(dict, json_dict)
         dcm_instance = pydicom.Dataset.from_json(json_dict)
 
-        # Set values for dicomweb standard tags
-        dcm = pydicom.Dataset()
-        for tag_keyword in self.tags_series_level_mandatory:
-            setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
-
-        tags_optional = self.tags_series_level_optional + self.included_fields_for_series
-        for tag_keyword in tags_optional:
-            if hasattr(dcm_instance, tag_keyword):
-                setattr(dcm, tag_keyword, dcm_instance.get(tag_keyword, ""))
-
-        dcm.NumberOfSeriesRelatedInstances = len(instance_metadata_dir_path_list)
+        series_json_dict = self._build_series_json_dict(dcm_instance, len(instance_metadata_dir_path_list))
 
         # Write series JSON
         series_json_path = series_dir_path / "index.json"
-        self.write_json(series_json_path, dcm.to_json_dict())
+        self.write_json(series_json_path, series_json_dict)
 
     def create_all_series_json(self, study_dir_path: str | Path):
         '''
@@ -219,13 +322,7 @@ class StaticDICOMWebCreator:
             series_json_dict = cast(dict, series_json_dict)
             all_series_json_dict_list.append(series_json_dict)
 
-        if len(all_series_json_dict_list) == 0:
-            return
-
-        dcm = pydicom.Dataset()
-        dcm.StudyInstanceUID = study_dir_path.name
-        all_series_json_path = self.build_path_all_series_json(dcm)
-        self.write_json(all_series_json_path, all_series_json_dict_list)
+        self._write_all_series_json(study_dir_path, all_series_json_dict_list)
 
     def create_study_json(self, study_dir_path: str | Path):
         '''
@@ -238,21 +335,6 @@ class StaticDICOMWebCreator:
         if dcm_template is None:
             return
 
-        dcm = pydicom.Dataset()
-
-        # Set values for dicomweb standard tags
-        for tag_keyword in self.tags_study_level_mandatory:
-            setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
-
-        for tag_keyword in self.tags_study_level_optional:
-            if hasattr(dcm_template, tag_keyword):
-                setattr(dcm, tag_keyword, dcm_template.get(tag_keyword, ""))
-
-        # Set some complicated values
-        modalities_in_study = set()
-        number_of_study_related_series = 0
-        number_of_study_related_instances = 0
-
         dcm_tmp = pydicom.Dataset()
         dcm_tmp.StudyInstanceUID = study_dir_path.name
         all_series_json_path = self.build_path_all_series_json(dcm_tmp)
@@ -261,19 +343,11 @@ class StaticDICOMWebCreator:
         if all_series_json is None:
             return
 
-        for series_json_dict in cast(list, all_series_json):
-            dcm_se = pydicom.Dataset.from_json(series_json_dict)
-            modalities_in_study.add(dcm_se.Modality)
-            number_of_study_related_series += 1
-            number_of_study_related_instances += dcm_se.get("NumberOfSeriesRelatedInstances", 0)
-
-        dcm.ModalitiesInStudy = list(modalities_in_study)
-        dcm.NumberOfStudyRelatedSeries = number_of_study_related_series
-        dcm.NumberOfStudyRelatedInstances = number_of_study_related_instances
+        study_json_dict = self._build_study_json_dict(dcm_template, cast(list, all_series_json))
 
         # Write study JSON
         study_json_path = study_dir_path / "index.json"
-        self.write_json(study_json_path, dcm.to_json_dict())
+        self.write_json(study_json_path, study_json_dict)
 
     def create_all_studies_json(self):
         '''Gather study-level metadata for all studies.'''
@@ -286,10 +360,9 @@ class StaticDICOMWebCreator:
             if study_json is None:
                 continue
 
-            all_studies_json_dict_list.append(study_json)
+            all_studies_json_dict_list.append(cast(dict, study_json))
 
-        all_studies_json_path = self.build_path_all_studies_json()
-        self.write_json(all_studies_json_path, all_studies_json_dict_list)
+        self._write_all_studies_json(all_studies_json_dict_list)
 
     def dcm_to_json_dict(self, dcm: pydicom.Dataset) -> tuple[dict, list[pydicom.DataElement]]:
         bulkdata_list: list[pydicom.DataElement] = []
